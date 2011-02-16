@@ -67,7 +67,7 @@
 -type client_id() :: binary().
 -type bucket() :: binary().
 -type key() :: binary().
--type riakc_obj() :: tuple().
+-type riak_object() :: tuple().
 -type riak_pbc_options() :: list().
 -type req_id() :: non_neg_integer().
 -type rpb_req() :: atom() | tuple().
@@ -190,7 +190,7 @@ get_server_info(Pid, Timeout) ->
 
 %% @doc Get bucket/key from the server
 %%      Will return {error, notfound} if the key is not on the server
--spec get(pid(), bucket() | string(), key() | string()) -> {ok, riakc_obj()} | {error, term()}.
+-spec get(pid(), bucket() | string(), key() | string()) -> {ok, riak_object()} | {error, term()}.
 get(Pid, Bucket, Key) ->
     get(Pid, Bucket, Key, [], default_timeout(get_timeout)).
 
@@ -198,7 +198,7 @@ get(Pid, Bucket, Key) ->
 %%      Will return {error, notfound} if the key is not on the server
 -spec get(pid(), bucket() | string(), key() | string(),
           timeout() |  riak_pbc_options()) ->
-                 {ok, riakc_obj()} | {error, term()}.
+                 {ok, riak_object()} | {error, term()}.
 get(Pid, Bucket, Key, Timeout) when is_integer(Timeout); Timeout =:= infinity ->
     get(Pid, Bucket, Key, [], Timeout);
 
@@ -211,19 +211,19 @@ get(Pid, Bucket, Key, Options) ->
 %%      [{r, 1}] would set r=1 for the request
 -spec get(pid(), bucket() | string(), key() | string(),
           riak_pbc_options(), timeout()) ->
-                 {ok, riakc_obj()} | {error, term()}.
+                 {ok, riak_object()} | {error, term()}.
 get(Pid, Bucket, Key, Options, Timeout) ->
     Req = get_options(Options, #rpbgetreq{bucket = Bucket, key = Key}),
     gen_server:call(Pid, {req, Req, Timeout}, infinity).
 
 %% @doc Put the metadata/value in the object under bucket/key
--spec put(pid(), riakc_obj()) -> ok | {ok, riakc_obj()} | {error, term()}.
+-spec put(pid(), riak_object()) -> ok | {ok, riak_object()} | {error, term()}.
 put(Pid, Obj) ->
     put(Pid, Obj, []).
 
 %% @doc Put the metadata/value in the object under bucket/key
--spec put(pid(), riakc_obj(), timeout() | riak_pbc_options()) ->
-                 ok | {ok, riakc_obj()} | {error, term()}.
+-spec put(pid(), riak_object(), timeout() | riak_pbc_options()) ->
+                 ok | {ok, riak_object()} | {error, term()}.
 put(Pid, Obj, Timeout) when is_integer(Timeout); Timeout =:= infinity ->
     put(Pid, Obj, [], Timeout);
 
@@ -231,7 +231,7 @@ put(Pid, Obj, Timeout) when is_integer(Timeout); Timeout =:= infinity ->
 %%      [{w,2}] sets w=2,
 %%      [{dw,1}] set dw=1,
 %%      [{return_body, true}] returns the updated metadata/value
-%%      Put throws siblings if the riakc_obj contains siblings
+%%      Put throws siblings if the riak_object contains siblings
 %%      that have not been resolved by calling select_sibling/2 or 
 %%      update_value/2 and update_metadata/2.
 put(Pid, Obj, Options) ->
@@ -241,18 +241,24 @@ put(Pid, Obj, Options) ->
 %%      [{w,2}] sets w=2,
 %%      [{dw,1}] set dw=1,
 %%      [{return_body, true}] returns the updated metadata/value
-%%      Put throws siblings if the riakc_obj contains siblings
+%%      Put throws siblings if the riak_object contains siblings
 %%      that have not been resolved by calling select_sibling/2 or 
 %%      update_value/2 and update_metadata/2.
--spec put(pid(), riakc_obj(), riak_pbc_options(), timeout()) -> 
-                 ok | {ok, riakc_obj()} | {error, term()}.
+-spec put(pid(), riak_object(), riak_pbc_options(), timeout()) -> 
+                 ok | {ok, riak_object()} | {error, term()}.
 put(Pid, Obj, Options, Timeout) ->
-    Content = riakc_pb:pbify_rpbcontent({riakc_obj:get_update_metadata(Obj),
-                                         riakc_obj:get_update_value(Obj)}),
+		ObjApply = riakc_obj:apply_updates(Obj),
+    Content = riakc_pb:pbify_rpbcontent({riakc_obj:get_metadata(ObjApply),
+                                         riakc_obj:get_value(ObjApply)}),
     Req = put_options(Options,
-                      #rpbputreq{bucket = riakc_obj:bucket(Obj),
-                                 key = riakc_obj:key(Obj),
-                                 vclock = riakc_obj:vclock(Obj),
+                      #rpbputreq{bucket = riakc_obj:bucket(ObjApply),
+                                 key = riakc_obj:key(ObjApply),
+                                 vclock = case riakc_obj:vclock(ObjApply) of
+                                 	[] ->
+                                 		undefined;
+																	_ ->
+																		riakc_obj:vclock(ObjApply)
+                                 end,
                                  content = Content}),
     gen_server:call(Pid, {req, Req, Timeout}, infinity).
 
@@ -838,18 +844,20 @@ process_response(#request{msg = #rpbgetreq{}}, rpbgetresp, State) ->
     %% server just returned the rpbgetresp code - no message was encoded
     {reply, {error, notfound}, State};
 process_response(#request{msg = #rpbgetreq{bucket = Bucket, key = Key}},
-                 #rpbgetresp{content = RpbContents, vclock = Vclock}, State) ->
+                 #rpbgetresp{content = RpbContents}, State) ->
     Contents = riakc_pb:erlify_rpbcontents(RpbContents),
-    {reply, {ok, riakc_obj:new_obj(Bucket, Key, Vclock, Contents)}, State};
+		[{Meta, Value}] = Contents,
+    {reply, {ok, riakc_obj:new(Bucket, Key, Value, Meta)}, State};
 
 process_response(#request{msg = #rpbputreq{}},
                  rpbputresp, State) ->
     %% server just returned the rpbputresp code - no message was encoded
     {reply, ok, State};
 process_response(#request{msg = #rpbputreq{bucket = Bucket, key = Key}},
-                 #rpbputresp{content = RpbContents, vclock = Vclock}, State) ->
+                 #rpbputresp{content = RpbContents}, State) ->
     Contents = riakc_pb:erlify_rpbcontents(RpbContents),
-    {reply, {ok, riakc_obj:new_obj(Bucket, Key, Vclock, Contents)}, State};
+		[{Meta, Value}] = Contents,
+    {reply, {ok, riakc_obj:new(Bucket, Key, Value, Meta)}, State};
 
 process_response(#request{msg = #rpbdelreq{}},
                  rpbdelresp, State) ->
@@ -1138,7 +1146,6 @@ decode_mapred_resp(Data, <<"application/x-erlang-binary">>) ->
 %%
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
--include("riakc_obj.hrl").
 
 %% Get the test host - check env RIAK_TEST_PB_HOST then env 'RIAK_TEST_HOST'
 %% falling back to 127.0.0.1
@@ -1425,8 +1432,7 @@ live_node_tests() ->
       ?_test(begin
                  reset_riak(),
                  {ok, Pid} = start_link(test_ip(), test_port()),
-                 O0 = riakc_obj:new(<<"b">>, <<"k">>),
-                 O = riakc_obj:update_value(O0, <<"v">>),
+                 O = riakc_obj:new(<<"b">>, <<"k">>, <<"v">>),
                  {ok, PO} = ?MODULE:put(Pid, O, [return_body]),
                  {ok, GO} = ?MODULE:get(Pid, <<"b">>, <<"k">>),
                  ?assertEqual(riakc_obj:get_contents(PO), riakc_obj:get_contents(GO))
@@ -1436,8 +1442,7 @@ live_node_tests() ->
       ?_test(begin
                  reset_riak(),
                  {ok, Pid} = start_link(test_ip(), test_port()),
-                 O0 = riakc_obj:new(<<"b">>, <<"k">>),
-                 O = riakc_obj:update_value(O0, <<"v">>),
+                 O = riakc_obj:new(<<"b">>, <<"k">>, <<"v">>),
                  {ok, PO} = ?MODULE:put(Pid, O, [{w, 1}, {dw, 1}, return_body]),
                  {ok, GO} = ?MODULE:get(Pid, <<"b">>, <<"k">>, 500),
                  ?assertEqual(riakc_obj:get_contents(PO), riakc_obj:get_contents(GO))
@@ -1447,8 +1452,7 @@ live_node_tests() ->
       ?_test(begin
                  reset_riak(),
                  {ok, Pid} = start_link(test_ip(), test_port()),
-                 O0 = riakc_obj:new(<<"b">>, <<"k">>),
-                 O = riakc_obj:update_value(O0, <<"v">>),
+                 O = riakc_obj:new(<<"b">>, <<"k">>, <<"v">>),
                  {ok, PO} = ?MODULE:put(Pid, O, [{w, 1}, {dw, 1}, return_body]),
                  {ok, GO} = ?MODULE:get(Pid, <<"b">>, <<"k">>, [{r, 1}]),
                  ?assertEqual(riakc_obj:get_contents(PO), riakc_obj:get_contents(GO))
@@ -1470,8 +1474,7 @@ live_node_tests() ->
       ?_test(begin
                  reset_riak(),
                  {ok, Pid} = start_link(test_ip(), test_port()),
-                 O0 = riakc_obj:new(<<"b">>, <<"k">>),
-                 O = riakc_obj:update_value(O0, <<"v">>),
+                 O = riakc_obj:new(<<"b">>, <<"k">>, <<"v">>),
                  {ok, PO} = ?MODULE:put(Pid, O, [return_body]),
                  PO2 = riakc_obj:update_value(PO, <<"v2">>),
                  ok = ?MODULE:put(Pid, PO2),
@@ -1484,8 +1487,7 @@ live_node_tests() ->
                  reset_riak(),
                  {ok, Pid} = start_link(test_ip(), test_port()),
                  %% Put key/value
-                 O0 = riakc_obj:new(<<"b">>, <<"k">>),
-                 O = riakc_obj:update_value(O0, <<"v">>),
+                 O = riakc_obj:new(<<"b">>, <<"k">>, <<"v">>),
                  {ok, _PO} = ?MODULE:put(Pid, O, [return_body]),
                  %% Prove it really got stored
                  {ok, GO1} = ?MODULE:get(Pid, <<"b">>, <<"k">>),
@@ -1517,8 +1519,8 @@ live_node_tests() ->
                  {ok, Pid} = start_link(test_ip(), test_port()),
                  Bs = lists:sort([list_to_binary(["b"] ++ integer_to_list(N)) || N <- lists:seq(1, 10)]),
                  F = fun(B) ->
-                             O=riakc_obj:new(B, <<"key">>),
-                             ?MODULE:put(Pid, riakc_obj:update_value(O, <<"val">>))
+                             O=riakc_obj:new(B, <<"key">>, <<"val">>),
+                             ?MODULE:put(Pid, O)
                      end,
                  [F(B) || B <- Bs],
                  {ok, LBs} = ?MODULE:list_buckets(Pid),
@@ -1532,8 +1534,8 @@ live_node_tests() ->
                  Bucket = <<"listkeys">>,
                  Ks = lists:sort([list_to_binary(integer_to_list(N)) || N <- lists:seq(1, 10)]),
                  F = fun(K) ->
-                             O=riakc_obj:new(Bucket, K),
-                             ?MODULE:put(Pid, riakc_obj:update_value(O, <<"val">>))
+                             O=riakc_obj:new(Bucket, K, <<"val">>),
+                             ?MODULE:put(Pid, O)
                      end,
                  [F(K) || K <- Ks],
                  {ok, LKs} = ?MODULE:list_keys(Pid, Bucket),
@@ -1566,39 +1568,14 @@ live_node_tests() ->
                               lists:sort(Props))
              end)},
 
-     {"allow_mult should allow dupes",
-      ?_test(begin
-                 reset_riak(),
-                 {ok, Pid1} = start_link(test_ip(), test_port()),
-                 {ok, Pid2} = start_link(test_ip(), test_port()),
-                 ok = set_bucket(Pid1, <<"multibucket">>, [{allow_mult, true}]),
-                 ?MODULE:delete(Pid1, <<"multibucket">>, <<"foo">>),
-                 {error, notfound} = ?MODULE:get(Pid1, <<"multibucket">>, <<"foo">>),
-                 O = riakc_obj:new(<<"multibucket">>, <<"foo">>),
-                 O1 = riakc_obj:update_value(O, <<"pid1">>),
-                 O2 = riakc_obj:update_value(O, <<"pid2">>),
-                 ok = ?MODULE:put(Pid1, O1),
-
-                 ok = ?MODULE:put(Pid2, O2),
-                 {ok, O3} = ?MODULE:get(Pid1, <<"multibucket">>, <<"foo">>),
-                 ?assertEqual([<<"pid1">>, <<"pid2">>], lists:sort(riakc_obj:get_values(O3))),
-                 O4 = riakc_obj:update_value(riakc_obj:select_sibling(1, O3), <<"resolved">>),
-                 ok = ?MODULE:put(Pid1, O4),
-                 {ok, GO} = ?MODULE:get(Pid1, <<"multibucket">>, <<"foo">>),
-                 ?assertEqual([<<"resolved">>], lists:sort(riakc_obj:get_values(GO))),
-                 ?MODULE:delete(Pid1, <<"multibucket">>, <<"foo">>)
-             end)},
-
      {"update object test", 
       ?_test(begin
                  reset_riak(),
                  {ok, Pid} = start_link(test_ip(), test_port()),
                  O0 = riakc_obj:new(<<"b">>, <<"k">>, <<"d">>),
-                 io:format("O0: ~p\n", [O0]),
                  {ok, O1} = riakc_pb_socket:put(Pid, O0, [return_body]),
-                 io:format("O1: ~p\n", [O1]),
                  M1 = riakc_obj:get_metadata(O1),
-                 M2 = dict:store(?MD_LINKS, [{{<<"b">>, <<"k1">>}, <<"t1">>}], M1),
+                 M2 = dict:store(<<"Links">>, [{{<<"b">>, <<"k1">>}, <<"t1">>}], M1),
                  O2 = riakc_obj:update_metadata(O1, M2),
                  riakc_pb_socket:put(Pid, O2)
              end)},
@@ -1660,9 +1637,8 @@ live_node_tests() ->
                  {ok, Pid} = start_link(test_ip(), test_port()),
                  B = <<"bucket">>,
                  K = <<"foo">>,
-                 O=riakc_obj:new(B, K),
-                 ?MODULE:put(Pid, riakc_obj:update_value(O, <<"2">>, "application/json")),
-
+								 O = riakc_obj:new(B, K, <<"2">>, "application/json"),
+                 ?MODULE:put(Pid, O),
                  ?assertEqual({ok, [{0, [2]}]},
                               ?MODULE:mapred(Pid,
                                              [{B, K}],
@@ -1676,8 +1652,8 @@ live_node_tests() ->
                  {ok, Pid} = start_link(test_ip(), test_port()),
                  B = <<"bucket">>,
                  K = <<"foo">>,
-                 O=riakc_obj:new(B, K),
-                 ?MODULE:put(Pid, riakc_obj:update_value(O, <<"99">>, "application/json")),
+                 O=riakc_obj:new(B, K, <<"99">>, "application/json"),
+                 ?MODULE:put(Pid, O),
 
                  ?assertEqual({ok, [{0, [99]}]},
                               ?MODULE:mapred(Pid,
@@ -1691,8 +1667,8 @@ live_node_tests() ->
                  reset_riak(),
                  {ok, Pid} = start_link(test_ip(), test_port()),
                  Store = fun({K,V}) ->
-                                 O=riakc_obj:new(<<"bucket">>, K),
-                                 ?MODULE:put(Pid,riakc_obj:update_value(O, V, "application/json"))
+                                 O=riakc_obj:new(<<"bucket">>, K, V, "application/json"),
+                                 ?MODULE:put(Pid, O)
                          end,
                  [Store(KV) || KV <- [{<<"foo">>, <<"2">>},
                                       {<<"bar">>, <<"3">>},
@@ -1721,8 +1697,8 @@ live_node_tests() ->
                  reset_riak(),
                  {ok, Pid} = start_link(test_ip(), test_port()),
                  Store = fun({K,V}) ->
-                                 O=riakc_obj:new(<<"bucket">>, K),
-                                 ?MODULE:put(Pid,riakc_obj:update_value(O, V, "application/json"))
+                                 O=riakc_obj:new(<<"bucket">>, K, V, "application/json"),
+                                 ?MODULE:put(Pid, O)
                          end,
                  [Store(KV) || KV <- [{<<"foo">>, <<"2">>},
                                       {<<"bar">>, <<"3">>},
@@ -1742,8 +1718,8 @@ live_node_tests() ->
                  reset_riak(),
                  {ok, Pid} = start_link(test_ip(), test_port()),
                  Store = fun({K,V}) ->
-                                 O=riakc_obj:new(<<"bucket">>, K),
-                                 ?MODULE:put(Pid,riakc_obj:update_value(O, V, "application/json"))
+                                 O=riakc_obj:new(<<"bucket">>, K, V, "application/json"),
+                                 ?MODULE:put(Pid, O)
                          end,
                  [Store(KV) || KV <- [{<<"foo">>, <<"2">>},
                                       {<<"bar">>, <<"3">>},
@@ -1759,8 +1735,8 @@ live_node_tests() ->
       ?_test(begin
                  reset_riak(),
                  {ok, Pid} = start_link(test_ip(), test_port()),
-                 O=riakc_obj:new(<<"bucket">>, <<"foo">>),
-                 ?MODULE:put(Pid, riakc_obj:update_value(O, <<"2">>, "application/json")),
+                 O=riakc_obj:new(<<"bucket">>, <<"foo">>, <<"2">>, "application/json"),
+                 ?MODULE:put(Pid, O),
                  ?assertEqual({ok, [{1, [10]}]},
                               ?MODULE:mapred(Pid,
                                              [{{<<"bucket">>, <<"foo">>}, 5},
@@ -1778,8 +1754,8 @@ live_node_tests() ->
                  reset_riak(),
                  {ok, Pid} = start_link(test_ip(), test_port()),
                  Store = fun({K,V}) ->
-                                 O=riakc_obj:new(<<"bucket">>, K),
-                                 ?MODULE:put(Pid,riakc_obj:update_value(O, V, "application/json"))
+                                 O=riakc_obj:new(<<"bucket">>, K, V, "application/json"),
+                                 ?MODULE:put(Pid, O)
                          end,
                  [Store(KV) || KV <- [{<<"foo">>, <<"2">>},
                                       {<<"bar">>, <<"3">>},
@@ -1858,24 +1834,48 @@ live_node_tests() ->
                  TestNode = test_riak_node(),
                  MyBin = <<"some binary">>,
                  MyTerm = [<<"b">>,<<"a_term">>,{some_term, ['full', "of", 123, 654.321]}],
-                 BinObj = rpc:call(TestNode, riak_object, new,
+                 BinObj = rpc:call(TestNode, riakc_obj, new,
                                    [<<"b">>, <<"a_bin">>, MyBin]),
-                 TermObj = rpc:call(TestNode, riak_object, new,
+                 TermObj = rpc:call(TestNode, riakc_obj, new,
                                     [<<"b">>, <<"a_term">>, MyTerm]),
                  {ok, C} = rpc:call(TestNode, riak, local_client, []),
                  %% parameterized module trickery - stick it as the last argument
                  ok = rpc:call(TestNode, riak_client, put, [BinObj, 1, C]),
                  ok = rpc:call(TestNode, riak_client, put, [TermObj, 1, C]),
+     
+     								                  {ok, Pid} = start_link(test_ip(), test_port()),
+     								                  {ok, GotBinObj} = ?MODULE:get(Pid, <<"b">>, <<"a_bin">>),
+     								                  {ok, GotTermObj} = ?MODULE:get(Pid, <<"b">>, <<"a_term">>),
+     								        
+     								                  ?assertEqual(riakc_obj:get_value(GotBinObj), MyBin),
+     								 Ct = dict:fetch(<<"content-type">>, riakc_obj:get_metadata(GotTermObj)),
+     								                  ?assertEqual(Ct, "application/x-erlang-binary"),
+     								                  ?assertEqual(binary_to_term(riakc_obj:get_value(GotTermObj)), MyTerm)
+             end)},
 
-                 {ok, Pid} = start_link(test_ip(), test_port()),
-                 {ok, GotBinObj} = ?MODULE:get(Pid, <<"b">>, <<"a_bin">>),
-                 {ok, GotTermObj} = ?MODULE:get(Pid, <<"b">>, <<"a_term">>),
-  
-                 ?assertEqual(riakc_obj:get_value(GotBinObj), MyBin),
-                 ?assertEqual(riakc_obj:get_content_type(GotTermObj),
-                              "application/x-erlang-binary"),
-                 ?assertEqual(binary_to_term(riakc_obj:get_value(GotTermObj)), MyTerm)
+     {"allow_mult should allow dupes",
+      ?_test(begin
+                 reset_riak(),
+                 {ok, Pid1} = start_link(test_ip(), test_port()),
+                 {ok, Pid2} = start_link(test_ip(), test_port()),
+                 ok = set_bucket(Pid1, <<"multibucket">>, [{allow_mult, true}]),
+                 ?MODULE:delete(Pid1, <<"multibucket">>, <<"foo">>),
+                 {error, notfound} = ?MODULE:get(Pid1, <<"multibucket">>, <<"foo">>),
+                 O = riakc_obj:new(<<"multibucket">>, <<"foo">>, nil),
+                 O1 = riakc_obj:update_value(O, <<"pid1">>),
+                 O2 = riakc_obj:update_value(O, <<"pid2">>),
+                 ok = ?MODULE:put(Pid1, O1),
+     
+                 ok = ?MODULE:put(Pid2, O2),
+                 {ok, O3} = ?MODULE:get(Pid1, <<"multibucket">>, <<"foo">>),
+                 ?assertEqual([<<"pid1">>, <<"pid2">>], lists:sort(riakc_obj:get_values(O3))),
+                 O4 = riakc_obj:update_value(riakc_obj:select_sibling(1, O3), <<"resolved">>),
+                 ok = ?MODULE:put(Pid1, O4),
+                 {ok, GO} = ?MODULE:get(Pid1, <<"multibucket">>, <<"foo">>),
+                 ?assertEqual([<<"resolved">>], lists:sort(riakc_obj:get_values(GO))),
+                 ?MODULE:delete(Pid1, <<"multibucket">>, <<"foo">>)
              end)}
+
      ].
 
 -endif.
